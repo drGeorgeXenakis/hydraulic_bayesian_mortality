@@ -1,13 +1,26 @@
 &bayes
  ! 1 = P50 depth-duration (original suggestion); 2 = persistent PLC exposure.
- exposure_mode=1, psi_scale=1.0, loss_threshold=0.5,
- n_particles=8000, seed_value=271828, use_observations=.false.,
+ exposure_mode=1,
+ psi_scale=1.0,
+ loss_threshold=0.5,
+ n_particles=8000,
+ seed_value=271828,
+ use_observations=.false.,
+
  ! Lognormal priors: medians in DAY^-1; SDs on natural-log scale.
- lambda0_median=0.0001, lambda0_logsd=1.5,
- k_median=0.05, k_logsd=1.0,
+ lambda0_median=0.0001,
+ lambda0_logsd=1.5,
+ k_median=0.05,
+ k_logsd=1.0,
+
  ! Categorical prior on exposure exponent q (dimensionless).
- nq=3, q_values=1.0,2.0,3.0, q_prior=0.3333333333,0.3333333333,0.3333333334,
+ nq=3,
+ q_values=1.0,2.0,3.0,
+ q_prior=0.3333333333,0.3333333333,0.3333333334,
+
  ! P50 = hydraulic parameters.nml p50 + offset (MPa).
  ! Same P50 is used in embolism and mortality; other hydraulic traits fixed.
- np50=3, p50_offsets=-0.2,0.0,0.2, p50_prior=0.25,0.5,0.25
+ np50=3,
+ p50_offsets=-0.2,0.0,0.2,
+ p50_prior=0.25,0.5,0.25
 /
