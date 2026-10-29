@@ -1,0 +1,4 @@
+case_id,forcing_file,n_trees,n_dead
+control,forcing_control.csv,20,0
+moderate,forcing_moderate.csv,20,1
+severe,forcing_severe.csv,20,6
