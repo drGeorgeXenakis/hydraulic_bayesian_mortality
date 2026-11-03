@@ -1,0 +1,2 @@
+case_id,forcing_file,n_trees,n_dead
+seasonal,forcing_seasonal.csv,0,0

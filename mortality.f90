@@ -1,4 +1,4 @@
-! F95 Bayesian importance sampling, conditional on fixed hydraulic traits
+! Version 2.0 -- F95 Bayesian importance sampling, conditional on fixed hydraulic traits
 ! except for a categorical P50 prior. All time integrals for mortality use DAYS.
 module mortality_tools
   use hydraulics
@@ -148,11 +148,14 @@ program hydraulic_mortality
   character(256), allocatable :: paths(:)
   character(2048) :: line
   character(32) :: inference
-  ! hyd columns: time,T,theta,VPD,day,soil,psi,loss,g,E,Q,R,water_out,water_in
+  ! hyd 1:14 as v1; 15:22 Kpot,Kfun,growth factor,leaf factor,
+  ! cumulative growth,repair,retired potential capacity,new embolism loss.
   real(dp), allocatable :: hyd(:,:,:,:),dose(:,:,:,:),lam(:),kap(:),weights(:)
   real(dp), allocatable :: logw(:),vals(:),uniform(:),effective_p50(:)
   real(dp) :: base_p50,time,temp,theta,vpd,day,soil,psi,loss,previous,dt,h
   real(dp) :: e,q,g,r,water_out,water_in,exposure,cumdose(max_grid),duration
+  real(dp) :: kpot,kfun,growth,leaf,added,repaired,retired,damaged
+  real(dp) :: sum_growth,sum_repair,sum_retired,sum_damage
   real(dp) :: haz,ess,maxlog,mu,lo,med,hi,logz,balance,max_balance,elapsed
 
   open(10,file='parameters.nml',status='old',action='read',iostat=ios)
@@ -165,6 +168,7 @@ program hydraulic_mortality
   read(10,nml=bayes,iostat=ios)
   call check(ios==0,'invalid Bayesian namelist')
   close(10)
+  call validate_biology()
   call check(c>0 .and. r_other>=0 .and. r_xylem>0,'invalid capacitance/resistance')
   call check(height>=0 .and. leaf_area>0 .and. pressure>0,'invalid height/leaf area/pressure')
   call check(gmin>=0 .and. gmax>=gmin,'invalid conductance bounds')
@@ -234,7 +238,7 @@ program hydraulic_mortality
   inference='prior_predictive'
   if(use_observations) inference='posterior'
   maxrow=maxval(counts)
-  allocate(hyd(14,maxrow,ncase,np50),dose(nq,maxrow,ncase,np50))
+  allocate(hyd(22,maxrow,ncase,np50),dose(nq,maxrow,ncase,np50))
   allocate(effective_p50(np50))
   hyd=0; dose=0; max_balance=0
   do b=1,np50
@@ -244,12 +248,12 @@ program hydraulic_mortality
       open(12,file=trim(paths(j)),status='old',action='read')
       read(12,'(A)') line
       psi=initial_psi; loss=max(initial_loss,vulnerability(psi))
+      kpot=1._dp/r_xylem; kfun=kpot*(1._dp-loss)
+      sum_growth=0; sum_repair=0; sum_retired=0; sum_damage=0
       water_out=0; water_in=0; cumdose=0; previous=0
       do k=1,counts(j)
         read(12,'(A)') line
-        call commas(line)
-        read(line,*,iostat=ios) time,temp,theta,vpd,day
-        call check(ios==0,'invalid forcing columns: '//trim(paths(j)))
+        call read_forcing(line,time,temp,theta,vpd,day,growth,leaf)
         call check(time>=0 .and. time<1.e7_dp,'invalid forcing time')
         call check(temp>-100 .and. temp<100 .and. vpd>=0 .and. vpd<100,'invalid T/VPD')
         call check(day>=0 .and. day<=1,'invalid day factor')
@@ -260,7 +264,10 @@ program hydraulic_mortality
           call check(dt/max_step<1.e7_dp,'interval has too many substeps')
           nn=ceiling(dt/max_step); h=dt/real(nn,dp)
           do z=1,nn
-            call step(psi,loss,h,temp,vpd,day,soil,e,q)
+            call step(psi,loss,kpot,kfun,h,temp,vpd,day,soil,growth,leaf, &
+              e,q,added,repaired,retired,damaged)
+            sum_growth=sum_growth+added; sum_repair=sum_repair+repaired
+            sum_retired=sum_retired+retired; sum_damage=sum_damage+damaged
             water_out=water_out+h*e; water_in=water_in+h*q
             if(exposure_mode==1) then
               exposure=max(0._dp,(p50-psi)/psi_scale)
@@ -272,8 +279,9 @@ program hydraulic_mortality
             end do
           end do
         end if
-        call fluxes(psi,loss,temp,vpd,day,soil,g,e,q,r)
-        hyd(:,k,j,b)=(/time,temp,theta,vpd,day,soil,psi,loss,g,e,q,r,water_out,water_in/)
+        call fluxes(psi,kpot,kfun,temp,vpd,day,soil,leaf,g,e,q,r)
+        hyd(:,k,j,b)=(/time,temp,theta,vpd,day,soil,psi,loss,g,e,q,r,water_out,water_in, &
+          kpot,kfun,growth,leaf,sum_growth,sum_repair,sum_retired,sum_damage/)
         dose(:,k,j,b)=cumdose(1:nq)
         balance=c*(psi-initial_psi)-(water_in-water_out)
         max_balance=max(max_balance,abs(balance))
@@ -312,13 +320,14 @@ program hydraulic_mortality
   weights=weights/sum(weights)
   ess=1._dp/sum(weights*weights)
   open(13,file='diagnostics.txt',status='replace',action='write')
+  write(13,'(A)') 'Model version: 2.0 growth and optional repair'
   write(13,'(A)') 'Inference: '//trim(inference)
   write(13,'(A,I10)') 'Particles: ',n_particles
   write(13,'(A,F14.3)') 'Importance ESS: ',ess
   write(13,'(A,F14.6)') 'ESS / particles: ',ess/real(n_particles,dp)
-  write(13,'(A,ES16.7)') 'Maximum weight: ',maxval(weights)
-  write(13,'(A,ES16.7)') 'Log mean likelihood (binomial constants omitted): ',logz
-  write(13,'(A,ES16.7)') 'Maximum absolute hydraulic water balance residual L: ',max_balance
+  write(13,'(A,ES18.7E3)') 'Maximum weight: ',maxval(weights)
+  write(13,'(A,ES18.7E3)') 'Log mean likelihood (binomial constants omitted): ',logz
+  write(13,'(A,ES18.7E3)') 'Maximum absolute hydraulic water balance residual L: ',max_balance
   write(13,'(A)') 'Bands condition on fixed hydraulic traits except the specified P50 grid.'
   write(13,'(A)') 'Importance sampling is an approximation; repeat with more particles and other seeds.'
   if(ess<max(200._dp,.05_dp*real(n_particles,dp))) then
@@ -330,7 +339,7 @@ program hydraulic_mortality
   open(14,file='parameter_particles.csv',status='replace',action='write')
   write(14,'(A)') 'particle,lambda0_per_day,k_per_day,q,P50_MPa,prior_weight,weight'
   do ii=1,n_particles
-    write(14,'(I10,6(",",ES23.15))') ii,lam(ii),kap(ii),q_values(iq(ii)), &
+    write(14,'(I10,6(",",ES25.15E3))') ii,lam(ii),kap(ii),q_values(iq(ii)), &
       effective_p50(ip(ii)),uniform(ii),weights(ii)
   end do
   close(14)
@@ -338,33 +347,35 @@ program hydraulic_mortality
   open(14,file='parameter_summary.csv',status='replace',action='write')
   write(14,'(A)') 'parameter,mean,p025,median,p975'
   call summary(lam,weights,mu,lo,med,hi)
-  write(14,'(A,4(",",ES23.15))') 'lambda0_per_day',mu,lo,med,hi
+  write(14,'(A,4(",",ES25.15E3))') 'lambda0_per_day',mu,lo,med,hi
   call summary(kap,weights,mu,lo,med,hi)
-  write(14,'(A,4(",",ES23.15))') 'k_per_day',mu,lo,med,hi
+  write(14,'(A,4(",",ES25.15E3))') 'k_per_day',mu,lo,med,hi
   do ii=1,n_particles
     vals(ii)=q_values(iq(ii))
   end do
   call summary(vals,weights,mu,lo,med,hi)
-  write(14,'(A,4(",",ES23.15))') 'q',mu,lo,med,hi
+  write(14,'(A,4(",",ES25.15E3))') 'q',mu,lo,med,hi
   do ii=1,n_particles
     vals(ii)=effective_p50(ip(ii))
   end do
   call summary(vals,weights,mu,lo,med,hi)
-  write(14,'(A,4(",",ES23.15))') 'P50_MPa',mu,lo,med,hi
+  write(14,'(A,4(",",ES25.15E3))') 'P50_MPa',mu,lo,med,hi
   close(14)
 
   open(14,file='hydraulic_trajectories.csv',status='replace',action='write')
   write(14,'(A)') 'case_id,p50_member,P50_MPa,time_h,T_C,theta,VPD_kPa,day_factor,'// &
-    'soil_MPa,stem_MPa,PLC_percent,gsw_mol_m2_s,E_L_h,Qin_L_h,R_MPa_h_L,transpired_L,uptake_L'
+    'soil_MPa,stem_MPa,PLC_percent,gsw_mol_m2_s,E_L_h,Qin_L_h,R_MPa_h_L,transpired_L,uptake_L,'// &
+    'Kpot_L_h_MPa,Kfun_L_h_MPa,growth_factor,leaf_area_factor,'// &
+    'growth_added_K,repair_added_K,retired_potential_K,new_damage_K'
   open(15,file='exposure_doses.csv',status='replace',action='write')
   write(15,'(A)') 'case_id,p50_member,q,time_h,dose_days'
   do j=1,ncase
     do b=1,np50
       do k=1,counts(j)
-        write(14,'(A,",",I4,15(",",ES23.15))') trim(ids(j)),b,effective_p50(b), &
-          hyd(1:7,k,j,b),100._dp*hyd(8,k,j,b),hyd(9:14,k,j,b)
+        write(14,'(A,",",I4,23(",",ES25.15E3))') trim(ids(j)),b,effective_p50(b), &
+          hyd(1:7,k,j,b),100._dp*hyd(8,k,j,b),hyd(9:22,k,j,b)
         do l=1,nq
-          write(15,'(A,",",I4,3(",",ES23.15))') trim(ids(j)),b,q_values(l), &
+          write(15,'(A,",",I4,3(",",ES25.15E3))') trim(ids(j)),b,q_values(l), &
             hyd(1,k,j,b),dose(l,k,j,b)
         end do
       end do
@@ -385,10 +396,10 @@ program hydraulic_mortality
         vals(ii)=death_probability(haz)
       end do
       call summary(vals,weights,mu,lo,med,hi)
-      write(14,'(A,",",A,7(",",ES23.15))') trim(ids(j)),trim(inference), &
+      write(14,'(A,",",A,7(",",ES25.15E3))') trim(ids(j)),trim(inference), &
         hyd(1,k,j,1),elapsed,mu,lo,med,hi,1._dp-mu
     end do
-    write(15,'(A,",",A,2(",",I10),4(",",ES23.15))',advance='no') &
+    write(15,'(A,",",A,2(",",I10),4(",",ES25.15E3))',advance='no') &
       trim(ids(j)),trim(inference),ntrees(j),ndead(j),mu,lo,med,hi
     ! Replicate endpoint counts: mixture of binomials, unconditioned on realised
     ! counts in each replicate. Sample from weighted parameter particles.
@@ -405,7 +416,7 @@ program hydraulic_mortality
         vals(ii)=real(nbin,dp)
       end do
       call summary(vals,uniform,mu,lo,med,hi)
-      write(15,'(3(",",ES23.15))') lo,med,hi
+      write(15,'(3(",",ES25.15E3))') lo,med,hi
     else
       write(15,'(A)') ',NA,NA,NA'
     end if

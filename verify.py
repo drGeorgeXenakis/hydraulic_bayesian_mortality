@@ -27,7 +27,19 @@ def check_outputs(folder):
     for data in trajectories.values():
         plc = [float(r['PLC_percent']) for r in data]
         assert all(-1e-10 <= x <= 100+1e-10 for x in plc)
-        assert all(y >= x-1e-9 for x, y in zip(plc, plc[1:]))
+        # PLC can decline with growth or repair in version 2. Every row
+        # must still respect both the capacity identity and P50 curve.
+        for r in data:
+            kp=float(r['Kpot_L_h_MPa']);kf=float(r['Kfun_L_h_MPa'])
+            loss=float(r['PLC_percent'])/100
+            assert kp>0 and -1e-12<=kf<=kp+1e-12
+            assert abs(loss-(1-kf/kp))<1e-11
+            x=(float(r['stem_MPa'])-float(r['P50_MPa']))/.35
+            curve=math.exp(-x)/(1+math.exp(-x)) if x>=0 else 1/(1+math.exp(x))
+            assert loss>=curve-1e-9
+            # Potential-capacity accounting separates addition and retirement.
+            expected=1/.8+float(r['growth_added_K'])-float(r['retired_potential_K'])
+            assert abs(kp-expected)<1e-8
     risks = defaultdict(list)
     for row in rows(folder, 'risk_timeseries.csv'):
         risks[row['case_id']].append(row)
@@ -54,6 +66,11 @@ def main():
                         '-o','hydraulic_mortality'], cwd=work,check=True)
         settings=(work/'bayes_settings.nml').read_text().replace('n_particles=8000','n_particles=2000')
         (work/'bayes_settings.nml').write_text(settings)
+        # Direct analytic module tests exercise the new equations.
+        subprocess.run([compiler,'-std=f95','-O2','-fcheck=all',
+                        'hydraulics.f90',str(ROOT/'tests/unit_checks.f90'),
+                        '-o','unit_checks'],cwd=work,check=True)
+        subprocess.run([str(work/'unit_checks')],cwd=work,check=True)
         run(work)
         prior=check_outputs(work)
         particles=rows(work,'parameter_particles.csv')
@@ -108,6 +125,41 @@ def main():
         for r in rows(work,'risk_timeseries.csv'):
             expected=-math.expm1(-.01*float(r['elapsed_days']))
             assert abs(float(r['mean_Pdeath'])-expected) < 1e-11
+        # Wet, damaged cohort: growth, repair, and seasonal gates.
+        (work/'cases.csv').write_text('case_id,forcing_file,n_trees,n_dead\nwet,wet.csv,0,0\n')
+        with (work/'wet.csv').open('w') as f:
+            f.write('time_h,T_C,theta,VPD_kPa,day_factor,growth_factor,leaf_area_factor\n')
+            for hour in range(0,24*30+1,6):
+                f.write(f'{hour},20,0.35,0,0,1,1\n')
+        wet_hp=hp.replace('initial_loss=0.0','initial_loss=0.7')
+        (work/'parameters.nml').write_text(wet_hp)
+        (work/'bayes_settings.nml').write_text(settings)
+        run(work);check_outputs(work)
+        wet=rows(work,'hydraulic_trajectories.csv')
+        for b in ('1','2','3'):
+            part=[r for r in wet if int(r['p50_member'])==int(b)]
+            assert float(part[-1]['PLC_percent'])<float(part[0]['PLC_percent'])
+            assert float(part[-1]['growth_added_K'])>0
+            assert float(part[-1]['repair_added_K'])==0
+        # Turn growth off and enable explicit repair; potential capacity is fixed.
+        rp_hp=wet_hp.replace('growth_rate_per_day=0.001','growth_rate_per_day=0.0')
+        rp_hp=rp_hp.replace('repair_rate_per_day=0.0','repair_rate_per_day=0.1')
+        (work/'parameters.nml').write_text(rp_hp)
+        run(work);check_outputs(work)
+        repaired=rows(work,'hydraulic_trajectories.csv')
+        assert max(float(r['repair_added_K']) for r in repaired)>0
+        assert max(abs(float(r['Kpot_L_h_MPa'])-1/.8) for r in repaired)<1e-10
+        # Both recovery mechanisms off: persistent PLC under wet forcing.
+        (work/'parameters.nml').write_text(rp_hp.replace('repair_rate_per_day=0.1','repair_rate_per_day=0.0'))
+        run(work)
+        no_repair=rows(work,'hydraulic_trajectories.csv')
+        assert max(abs(float(r['PLC_percent'])-70) for r in no_repair)<1e-8
+        # Strict parsing must reject a six-column record instead of silently truncating it.
+        (work/'wet.csv').write_text('time_h,T_C,theta,VPD_kPa,day_factor,growth_factor\n'
+                                   '0,20,.35,0,0,1\n24,20,.35,0,0,1\n')
+        failed=subprocess.run([str(work/'hydraulic_mortality')],cwd=work,capture_output=True)
+        assert failed.returncode!=0
+        (work/'parameters.nml').write_text(hp)
         # Alternative PLC exposure: finite monotone risk and memory across rewetting.
         (work/'bayes_settings.nml').write_text(settings.replace('exposure_mode=1','exposure_mode=2'))
         (work/'cases.csv').write_text((ROOT/'cases.csv').read_text())
@@ -115,6 +167,7 @@ def main():
         check_outputs(work)
         print('PASS: compiled F95, water balance, persistent damage, monotone probabilities,')
         print('Bayesian likelihood weights, analytic baseline survival, PLC mode, timestep convergence.')
+        print('PASS additional v2 growth repair capacity-accounting and malformed-input checks.')
         print('Maximum mean-risk difference after halving timestep:',diff)
 
 if __name__=='__main__':

@@ -1,51 +1,77 @@
-# Verification record
+# Verification of version 2.0
 
-## Source checks actually completed
+Date: 3 November 2026. Compiler: GNU Fortran 13.3.0 (Ubuntu build).
 
-- Both Fortran files passed fparser's strict free-format parser and static
-  analyser (and the fparser2 grammar parser).
-- Maximum line length is below the standard 132-character free-format limit.
-- The included verification script passed Python bytecode syntax compilation.
-- No Fortran compiler was available in the creation environment. Therefore
-  the Fortran executable has NOT been compiled or run here. Static parsing is
-  not a substitute for compiler or executable testing.
+## Executable tests completed
 
-## Independent equation-level checks actually completed
+The actual Fortran source was compiled with `-std=f95 -Wall -Wextra -O2
+-fcheck=all`; the primary regression build also used
+`-ffpe-trap=invalid,zero,overflow`. No compiler warnings were emitted.
+`python3 verify.py` completed successfully with 2000 importance particles in its
+short-example runs, plus a fixed-hazard analytical test with 200 particles.
 
-An independent Python implementation reproduced the hydraulic equations,
-backward-Euler stepping and Bayesian likelihood on the supplied synthetic
-forcing. Its random generator differs from Fortran's, so numerical Monte Carlo
-summaries will not match exactly between implementations.
+Passed checks:
 
-- Maximum absolute hydraulic water balance residual: 6.13e-9 L.
-- Fractional embolism remained finite, within [0,1], and nondecreasing.
-- Synthetic posterior weights normalised correctly; importance ESS was about
-  1,702 of 8,000 prior particles using the supplied lognormal medians and grids.
-- Halving the internal step from 0.01 h to 0.005 h in the severe scenario
-  (P50=-3.6 MPa) changed stem potential by at most 0.00226 MPa.
-- For the same severe scenario, fixed q=2, lambda0=0.0001/day and k=0.2/day,
-  endpoint death probability changed by 3.67e-5 after halving the step. This
-  particular sensitivity check uses k=0.2, not the prior median k=0.05.
-- PLC-based exposure continued to accumulate after rewetting.
-- Analytical no-stress check: lambda0=0.01/day over 14 days gives mortality
-  probability 1-exp(-0.14)=0.1306417646.
+- Analytic additions to potential and functional conductance by growth.
+- Exponential repair of missing capacity and blocked repair in dry/cold states.
+- Proportional retirement and its preservation of fractional loss by itself.
+- P50-constrained functional conductance after provisional repair.
+- Historical damage persistence when growth and repair are off.
+- Water balance, positive potential capacity, bounded functional capacity,
+  L=1-Kfun/Kpot, and L at least the current vulnerability-curve value.
+- Potential-capacity accounting: Kpot=K0+growth-added-retired-potential.
+- Prior weight normalisation, independent endpoint-binomial posterior weight
+  calculation, analytic baseline-only survival and the alternative PLC mode.
+- Bounded and nondecreasing cumulative mortality, including during recovery.
+- Malformed six-column forcing rejection.
+- Halving the internal step in the original short example: maximum difference
+  in prior mean mortality probability 8.17e-5 (0.01 h versus 0.005 h).
 
-These are internal numerical checks, not empirical validation. No experimental
-survival or mortality data were used. The example's synthetic death counts
-were manually specified for demonstration.
+The source also passed strict free-format static parser/analysis checks.
+Source lines fit the 132-character free-format limit.
 
-## Executable checks supplied for your environment
+## Backward compatibility test completed
 
-Run `python3 verify.py` from the package directory with gfortran installed.
-It compiles the actual source with strict F95 and runtime checks, then tests:
+Both version 1 and version 2 were compiled and run on the original five-column
+example with 500 identical-seed prior particles. The new growth factor defaults
+to zero; repair and retirement were off. Maximum differences:
 
-1. Hydraulic mass balance and embolism memory.
-2. Probability bounds and nondecreasing cumulative mortality.
-3. Equal prior weights and correct posterior endpoint-binomial weights.
-4. Analytic baseline-only survival with fixed hazard.
-5. Timestep sensitivity of prior mean mortality.
-6. The alternative PLC-based exposure mode.
+- Stem water potential: 0 MPa.
+- PLC: 2.14e-14 percentage points.
+- Hydraulic resistance: 1.14e-13 MPa h/L.
+- Prior mean mortality probability: 0.
 
-The script uses temporary directories and does not overwrite your working
-inputs or outputs. Its tests assume the supplied example parameter values;
-keep an unmodified package copy for regression testing.
+## Two-year checks completed
+
+A continuous 730-day example was run with all three P50 members and 500 prior
+particles; repair and turnover were zero. A second run halved the internal
+step from 0.10 h to 0.05 h, and a third disabled growth.
+
+- Maximum absolute water balance error in the 0.10 h run: 1.16e-8 L.
+- Potential conductance increased from 1.25 to about 1.372615 L h^-1 MPa^-1.
+- Actual PLC declined during eligible recovery periods despite persistent
+  damage when recovery was disabled.
+- Maximum change in prior mean mortality probability after halving the step:
+  9.99e-4 (less than 0.001 in absolute probability).
+- Maximum stem-potential change in that timestep comparison: 0.00804 MPa.
+- The growth-off comparison confirmed fixed potential capacity and less
+  functional capacity than the growth-enabled scenario at recovery times.
+
+The root `verify.py` and `tests/check_two_years.py` reproduce the principal
+executable checks in temporary folders. Keep an unmodified example copy since
+regression assertions use its known parameters. The legacy comparison used the
+archived version 1 source and is reported here rather than bundled as a second
+model implementation.
+
+## Limits of these results
+
+These are numerical and implementation checks, not physiological validation.
+The forcing scenarios, rates, thresholds, priors and mortality counts are
+illustrative. More particles/different seeds and finer driver/timestep
+resolution are required to establish numerical precision for a particular
+application. The two-year timestep result is an example, not a universal error
+bound. No real survival data were used.
+
+Testing exposed and corrected an inherited Fortran CSV issue: exponents with
+three digits could omit the letter E. All scientific-format CSV outputs now
+explicitly reserve three exponent digits, including tiny posterior weights.
